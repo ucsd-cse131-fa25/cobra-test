@@ -1,0 +1,13 @@
+[package]
+name = "cobra"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[dependencies]
+sexp = "1.1.4"
+dynasm = "2.0.0"
+dynasmrt = "2.0.0"
+
+[dev-dependencies]
+prettydiff = "0.6.4"

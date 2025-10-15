@@ -1,0 +1,10 @@
+/target
+test/*.s
+runtime/*.o
+runtime/*.a
+.DS_Store
+.vscode/
+/tests/*.run
+/tests/*.a
+/tests/*.o
+Cargo.lock

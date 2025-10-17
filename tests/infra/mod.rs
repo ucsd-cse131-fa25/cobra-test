@@ -224,66 +224,80 @@ macro_rules! repl_tests {
 pub(crate) fn run_repl_sequence_test(name: &str, commands: &[&str], expected_outputs: &[&str]) {
     let actual_outputs = run_repl_with_timeout(commands, 3000);
 
-    // Parse outputs
-    let actual_lines = parse_repl_output(&actual_outputs);
-    let actual_vec: Vec<&str> = actual_lines.iter().map(|s| s.trim()).collect();
-
-    // For each expected_outputs entry, allow comma-separated substrings, and pass if all are found in the corresponding actual output
-    let mut mismatch = false;
-    for (i, expected) in expected_outputs.iter().enumerate() {
+    let mut current_pos = 0;
+    let mut found_outputs = Vec::new();
+    
+    for expected in expected_outputs {
+        // split by comma, find earliest substring in order
         let expected_subs: Vec<&str> = expected.split(',').map(|s| s.trim()).collect();
-        let actual = actual_vec.get(i).unwrap_or(&"");
-        let all_found = expected_subs.iter().all(|sub| actual.contains(sub));
-        if !all_found {
+        
+        // linear scan
+        let remaining = &actual_outputs[current_pos..];
+        let mut search_pos = 0;
+        let mut match_start = None;
+        let mut match_end = None;
+        
+        let mut all_found = true;
+        for (i, sub) in expected_subs.iter().enumerate() {
+            if let Some(pos) = remaining[search_pos..].find(sub) {
+                let absolute_pos = search_pos + pos;
+                
+                if i == 0 {
+                    match_start = Some(absolute_pos);
+                }
+                
+                search_pos = absolute_pos + sub.len();
+                
+                if i == expected_subs.len() - 1 {
+                    match_end = Some(search_pos);
+                }
+            } else {
+                all_found = false;
+                break;
+            }
+        }
+        
+        if all_found {
+            if let (Some(start), Some(end)) = (match_start, match_end) {
+                let matched_content = remaining[start..end].trim().to_string();
+                found_outputs.push(matched_content);
+                // Update current_pos to continue searching after this match
+                current_pos = current_pos + end;
+            } else {
+                eprintln!(
+                    "Found substrings but failed to extract match range for {:?}\nFull raw output:\n{}",
+                    expected_subs, actual_outputs
+                );
+                panic!(
+                    "Test '{}' failed: internal error extracting match",
+                    name
+                );
+            }
+        } else {
             eprintln!(
-                "Mismatch at index {}: expected substrings {:?} not all found in actual '{}'.\nFull raw output:\n{}",
-                i, expected_subs, actual, actual_outputs
+                "Could not find expected substrings {:?} in order in remaining output starting at position {}\nFull raw output:\n{}",
+                expected_subs, current_pos, actual_outputs
             );
-            mismatch = true;
+            panic!(
+                "Test '{}' failed: expected substrings {:?} not found in order in output",
+                name, expected_subs
+            );
         }
     }
-    if mismatch {
-        panic!(
-            "Vector mismatch in test '{}'\nExpected substrings: {:?}\nActual vector:   {:?}\n\nFull raw output:\n{}",
-            name, expected_outputs, actual_vec, actual_outputs
-        );
-    }
+    
+    println!("Successfully found all expected outputs in order");
 }
 
 
 
-fn parse_repl_output(raw_output: &str) -> Vec<String> {
-    let lines: Vec<&str> = raw_output.lines().collect();
-    let mut actual_lines = Vec::new();
-    
-    for i in 0..lines.len() {
-        let line = lines[i].trim();
-        
-        // Result on same line as > for some reason
-        if line.starts_with("> ") && line.len() > 2 {
-            let mut result = line[2..].trim();
-            // Sometimes skip result (with define)
-            while result.starts_with("> ") && result.len() > 2 {
-                result = result[2..].trim();
-            }
-            if !result.is_empty() && result != ">" {
-                actual_lines.push(result.to_string());
-                continue;
-            }
-        }
-        
-    }
-    
-    actual_lines
-}
 
 
 fn run_repl_with_timeout(commands: &[&str], timeout_ms: u64) -> String {
     // Probably dont need this for autograder
     let boa_path = if cfg!(target_os = "macos") {
-        "target/x86_64-apple-darwin/debug/boa"
+        "target/x86_64-apple-darwin/debug/cobra"
     } else {
-        "target/debug/boa"
+        "target/debug/cobra"
     };
 
     let mut child = Command::new(boa_path)

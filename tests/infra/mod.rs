@@ -132,12 +132,12 @@ fn compile(name: &str, file: &str, input: Option<&str>) -> Result<(String, Strin
         return Err(SnekError::Aot(String::from_utf8(output_c.stderr).unwrap()));
     }
 
-    let output_e = Command::new(&boa_path)
-        .arg("-e")
-        .arg(&mk_path(file, Ext::Snek))
-        .arg(input.unwrap_or(""))
-        .output()
-        .expect("could not run the compiler");
+    let mut cmd_e = Command::new(&boa_path);
+    cmd_e.arg("-e").arg(&mk_path(file, Ext::Snek));
+    if let Some(inp) = input {
+        cmd_e.arg(inp);
+    }
+    let output_e = cmd_e.output().expect("could not run the compiler");
     if !output_e.status.success() {
         return Err(SnekError::Jit(String::from_utf8(output_e.stderr).unwrap()));
     }
@@ -228,10 +228,9 @@ pub(crate) fn run_repl_sequence_test(name: &str, commands: &[&str], expected_out
     let mut found_outputs = Vec::new();
     
     for expected in expected_outputs {
-        // split by comma, find earliest substring in order
         let expected_subs: Vec<&str> = expected.split(',').map(|s| s.trim()).collect();
         
-        // linear scan
+        // Linear scan
         let remaining = &actual_outputs[current_pos..];
         let mut search_pos = 0;
         let mut match_start = None;
@@ -241,13 +240,10 @@ pub(crate) fn run_repl_sequence_test(name: &str, commands: &[&str], expected_out
         for (i, sub) in expected_subs.iter().enumerate() {
             if let Some(pos) = remaining[search_pos..].find(sub) {
                 let absolute_pos = search_pos + pos;
-                
                 if i == 0 {
                     match_start = Some(absolute_pos);
                 }
-                
                 search_pos = absolute_pos + sub.len();
-                
                 if i == expected_subs.len() - 1 {
                     match_end = Some(search_pos);
                 }
@@ -261,31 +257,26 @@ pub(crate) fn run_repl_sequence_test(name: &str, commands: &[&str], expected_out
             if let (Some(start), Some(end)) = (match_start, match_end) {
                 let matched_content = remaining[start..end].trim().to_string();
                 found_outputs.push(matched_content);
-                // Update current_pos to continue searching after this match
                 current_pos = current_pos + end;
             } else {
-                eprintln!(
-                    "Found substrings but failed to extract match range for {:?}\nFull raw output:\n{}",
-                    expected_subs, actual_outputs
-                );
-                panic!(
-                    "Test '{}' failed: internal error extracting match",
-                    name
-                );
+                eprintln!("[repl_test] Internal error extracting match for {:?}\nFull output:\n{}", expected_subs, actual_outputs);
+                panic!("Test '{}' failed: internal error extracting match", name);
             }
         } else {
-            eprintln!(
-                "Could not find expected substrings {:?} in order in remaining output starting at position {}\nFull raw output:\n{}",
-                expected_subs, current_pos, actual_outputs
+            let expected_str = format!("{:?}", expected_outputs);
+            let actual_str = format!("{:?}", found_outputs);
+            let expected_joined = expected_outputs.join("\n");
+            let actual_joined = found_outputs.join("\n");
+            eprintln!("\n[repl_test] MISMATCH\nExpected vector: {}\nActual vector:{}\n\nString diff:\n{}\n\nFull output:\n{}\n",
+                expected_str,
+                actual_str,
+                prettydiff::diff_lines(&actual_joined, &expected_joined),
+                actual_outputs
             );
-            panic!(
-                "Test '{}' failed: expected substrings {:?} not found in order in output",
-                name, expected_subs
-            );
+            panic!("Test '{}' failed: expected substrings {:?} not found in order in output", name, expected_subs);
         }
     }
-    
-    println!("Successfully found all expected outputs in order");
+    println!("[repl_test] Success!\nExpected vector: {:?}\nActual vector:   {:?}\n", expected_outputs, found_outputs);
 }
 
 

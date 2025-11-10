@@ -34,7 +34,7 @@ macro_rules! static_error_tests {
 #[macro_export]
 macro_rules! tests {
     // Accept test cases as identifier: { file: ..., ... }
-    ($kind:ident => $( $name:ident : { file: $file:literal, $(input: $input:literal,)? expected: $expected:literal $(,)? } ),* $(,)? ) => {
+    ($kind:ident => $( $name:ident : { file: $file:literal, $(input: $input:literal,)? expected: $expected:literal $(, typecheck: $typecheck:expr)? $(,)? } ),* $(,)? ) => {
         $(
             #[test]
             fn $name() {
@@ -42,19 +42,44 @@ macro_rules! tests {
                 let mut input = None;
                 $(input = Some($input);)?
                 let kind = $crate::infra::TestKind::$kind;
-                $crate::infra::run_test(stringify!($name), $file, input, $expected, kind);
+                let typecheck = false$(|| $typecheck)?;
+                $crate::infra::run_test_with_typecheck_flag(stringify!($name), $file, input, $expected, kind, typecheck);
             }
         )*
     };
 }
 
-pub(crate) fn run_test(
+
+
+pub(crate) fn run_test_with_typecheck_flag(
     name: &str,
     file: &str,
     input: Option<&str>,
     expected: &str,
     kind: TestKind,
+    typecheck: bool,
 ) {
+    if typecheck {
+        let boa_path = if cfg!(target_os = "macos") {
+            std::path::PathBuf::from("target/x86_64-apple-darwin/debug/cobra")
+        } else {
+            std::path::PathBuf::from("target/debug/cobra")
+        };
+        let mut cmd = std::process::Command::new(&boa_path);
+        cmd.arg("-tg")
+            .arg(mk_path(file, Ext::Snek))
+            .arg(mk_path(name, Ext::Asm));
+        if let Some(inp) = input {
+            cmd.arg(inp);
+        }
+        let output = cmd.output().expect("could not run cobra with -tg");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{}\n{}", stdout, stderr);
+        assert!(combined.trim() == expected.trim(), "Typecheck output did not match.\nExpected: '{}',\nGot: '{}'.", expected.trim(), combined.trim());
+        return;
+    }
+    // Run the normal test
     match kind {
         TestKind::Success => run_success_test(name, file, expected, input),
         TestKind::RuntimeError => run_runtime_error_test(name, file, expected, input),
@@ -209,20 +234,21 @@ pub(crate) fn run_success_test(name: &str, file: &str, expected: &str, input: Op
 
 #[macro_export]
 macro_rules! repl_tests {
-    ($($name:ident: [$($command:literal),*] => [$($expected:literal),*]),* $(,)?) => {
+    ($($name:ident: { commands: [$($command:expr),* $(,)?], expected: [$($expected:expr),* $(,)?] $(, typecheck: $typecheck:expr)? } ),* $(,)?) => {
         $(
         #[test]
         fn $name() {
             let commands = vec![$($command),*];
             let expected_outputs = vec![$($expected),*];
-            $crate::infra::run_repl_sequence_test(stringify!($name), &commands, &expected_outputs);
+            let typecheck = false$(|| $typecheck)?;
+            $crate::infra::run_repl_sequence_test(stringify!($name), &commands, &expected_outputs, typecheck);
         }
         )*
     }
 }
 
-pub(crate) fn run_repl_sequence_test(name: &str, commands: &[&str], expected_outputs: &[&str]) {
-    let actual_outputs = run_repl_with_timeout(commands, 3000);
+pub(crate) fn run_repl_sequence_test(name: &str, commands: &[&str], expected_outputs: &[&str], typecheck: bool) {
+    let actual_outputs = run_repl_with_timeout(commands, 3000, typecheck);
 
     let mut current_pos = 0;
     let mut found_outputs = Vec::new();
@@ -281,10 +307,7 @@ pub(crate) fn run_repl_sequence_test(name: &str, commands: &[&str], expected_out
 
 
 
-
-
-fn run_repl_with_timeout(commands: &[&str], timeout_ms: u64) -> String {
-    // Probably dont need this for autograder
+fn run_repl_with_timeout(commands: &[&str], timeout_ms: u64, typecheck: bool) -> String {
     let boa_path = if cfg!(target_os = "macos") {
         "target/x86_64-apple-darwin/debug/cobra"
     } else {
@@ -292,7 +315,7 @@ fn run_repl_with_timeout(commands: &[&str], timeout_ms: u64) -> String {
     };
 
     let mut child = Command::new(boa_path)
-        .arg("-i")
+        .arg(if typecheck { "-ti" } else { "-i" })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -301,24 +324,17 @@ fn run_repl_with_timeout(commands: &[&str], timeout_ms: u64) -> String {
 
     {
         let stdin = child.stdin.as_mut().expect("failed to open stdin");
-        
         for command in commands {
             writeln!(stdin, "{}", command).unwrap();
             stdin.flush().unwrap();
             thread::sleep(Duration::from_millis(100));
         }
-        
-        // kill REPL
         writeln!(stdin, "").unwrap();
         stdin.flush().unwrap();
     }
-    
-    // Processing
+
     thread::sleep(Duration::from_millis(timeout_ms));
-    
     let _ = child.kill();
-    
     let output = child.wait_with_output().expect("failed to read output");
     String::from_utf8_lossy(&output.stdout).to_string()
 }
-

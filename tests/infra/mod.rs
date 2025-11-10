@@ -59,36 +59,40 @@ pub(crate) fn run_test_with_typecheck_flag(
     kind: TestKind,
     typecheck: bool,
 ) {
-    if typecheck {
-        let boa_path = if cfg!(target_os = "macos") {
-            std::path::PathBuf::from("target/x86_64-apple-darwin/debug/cobra")
-        } else {
-            std::path::PathBuf::from("target/debug/cobra")
-        };
-        let mut cmd = std::process::Command::new(&boa_path);
-        cmd.arg("-tg")
-            .arg(mk_path(file, Ext::Snek))
-            .arg(mk_path(name, Ext::Asm));
-        if let Some(inp) = input {
-            cmd.arg(inp);
-        }
-        let output = cmd.output().expect("could not run cobra with -tg");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let combined = format!("{}\n{}", stdout, stderr);
-        assert!(combined.trim() == expected.trim(), "Typecheck output did not match.\nExpected: '{}',\nGot: '{}'.", expected.trim(), combined.trim());
-        return;
-    }
-    // Run the normal test
     match kind {
-        TestKind::Success => run_success_test(name, file, expected, input),
-        TestKind::RuntimeError => run_runtime_error_test(name, file, expected, input),
-        TestKind::StaticError => run_static_error_test(name, file, expected),
+        TestKind::Success => run_success_test_with_typecheck(name, file, expected, input, typecheck),
+        TestKind::RuntimeError => run_runtime_error_test_with_typecheck(name, file, expected, input, typecheck),
+        TestKind::StaticError => run_static_error_test_with_typecheck(name, file, expected, typecheck),
+    }
+}
+fn run_success_test_with_typecheck(name: &str, file: &str, expected: &str, input: Option<&str>, typecheck: bool) {
+    let (jit_out, run_out) = match compile_with_typecheck(name, file, input, typecheck) {
+        Ok((jit, run)) => (jit, run),
+        Err(SnekError::Aot(err)) => panic!("expected a successful compilation, but got an AOT error: `{}`", err),
+        Err(SnekError::Jit(err)) => panic!("expected a successful compilation, but got a JIT error: `{}`", err),
+        Err(SnekError::Run(err)) => panic!("expected a successful run, but got a runtime error: `{}`", err),
+    };
+
+    let expected_trim = expected.trim();
+    let jit_trim = jit_out.trim();
+    let run_trim = run_out.trim();
+    let mut failed_flags = Vec::new();
+    if expected_trim != jit_trim {
+        failed_flags.push((if typecheck { "-te" } else { "-e" }, jit_trim.to_string(), jit_out));
+    }
+    if expected_trim != run_trim {
+        failed_flags.push((if typecheck { "-tc" } else { "-c" }, run_trim.to_string(), run_out));
+    }
+    if !failed_flags.is_empty() {
+        for (flag, actual_trim, raw) in &failed_flags {
+            eprintln!("Flag {} unexpected output:\n{}", flag, prettydiff::diff_lines(raw, expected_trim));
+        }
+        panic!("test failed: outputs did not match expected value for flags: {:?}", failed_flags.iter().map(|(f,_,_)| *f).collect::<Vec<_>>());
     }
 }
 
-fn run_runtime_error_test(name: &str, file: &str, expected: &str, input: Option<&str>) {
-    match compile(name, file, input) {
+fn run_runtime_error_test_with_typecheck(name: &str, file: &str, expected: &str, input: Option<&str>, typecheck: bool) {
+    match compile_with_typecheck(name, file, input, typecheck) {
         Err(SnekError::Aot(err)) => {
             panic!("expected a successful compilation, but got an AOT error: `{}`", err);
         }
@@ -102,11 +106,10 @@ fn run_runtime_error_test(name: &str, file: &str, expected: &str, input: Option<
     }
 }
 
-fn run_static_error_test(name: &str, file: &str, expected: &str) {
-    match compile(name, file, None) {
+fn run_static_error_test_with_typecheck(name: &str, file: &str, expected: &str, typecheck: bool) {
+    match compile_with_typecheck(name, file, None, typecheck) {
         Ok((e1,e2)) => panic!("expected a failure, but compilation succeeded"),
         Err(err) => check_error_msg(&err, expected),
-
     }
 }
 
@@ -140,15 +143,17 @@ impl std::fmt::Display for Ext {
     }
 }
 
-fn compile(name: &str, file: &str, input: Option<&str>) -> Result<(String, String), SnekError> {
-    // Run the compiler
+
+fn compile_with_typecheck(name: &str, file: &str, input: Option<&str>, typecheck: bool) -> Result<(String, String), SnekError> {
     let boa_path = if cfg!(target_os = "macos") {
         PathBuf::from("target/x86_64-apple-darwin/debug/cobra")
     } else {
         PathBuf::from("target/debug/cobra")
     };
+    // First phase: compile (-c or -tc)
+    let compile_flag = if typecheck { "-tc" } else { "-c" };
     let output_c = Command::new(&boa_path)
-        .arg("-c")
+        .arg(compile_flag)
         .arg(&mk_path(file, Ext::Snek))
         .arg(&mk_path(name, Ext::Asm))
         .output()
@@ -157,8 +162,10 @@ fn compile(name: &str, file: &str, input: Option<&str>) -> Result<(String, Strin
         return Err(SnekError::Aot(String::from_utf8(output_c.stderr).unwrap()));
     }
 
+    // Second phase: execute (-e or -te)
     let mut cmd_e = Command::new(&boa_path);
-    cmd_e.arg("-e").arg(&mk_path(file, Ext::Snek));
+    let exec_flag = if typecheck { "-te" } else { "-e" };
+    cmd_e.arg(exec_flag).arg(&mk_path(file, Ext::Snek));
     if let Some(inp) = input {
         cmd_e.arg(inp);
     }
@@ -197,37 +204,6 @@ fn run(name: &str, input: Option<&str>) -> Result<String, String> {
         Ok(String::from_utf8(output.stdout).unwrap().trim().to_string())
     } else {
         Err(String::from_utf8(output.stderr).unwrap().trim().to_string())
-    }
-}
-
-
-pub(crate) fn run_success_test(name: &str, file: &str, expected: &str, input: Option<&str>) {
-    let (jit_out, run_out) = match compile(name, file, input) {
-        Ok((jit, run)) => (jit, run),
-        Err(SnekError::Aot(err)) => panic!("expected a successful compilation, but got an AOT error: `{}`", err),
-        Err(SnekError::Jit(err)) => panic!("expected a successful compilation, but got a JIT error: `{}`", err),
-        Err(SnekError::Run(err)) => panic!("expected a successful run, but got a runtime error: `{}`", err),
-    };
-
-    let expected_trim = expected.trim();
-
-    let jit_trim = jit_out.trim();
-    let run_trim = run_out.trim();
-
-    let mut failed_flags = Vec::new();
-
-    if expected_trim != jit_trim {
-        failed_flags.push(("-e", jit_trim.to_string(), jit_out));
-    }
-    if expected_trim != run_trim {
-        failed_flags.push(("-c", run_trim.to_string(), run_out));
-    }
-
-    if !failed_flags.is_empty() {
-        for (flag, actual_trim, raw) in &failed_flags {
-            eprintln!("Flag {} unexpected output:\n{}", flag, prettydiff::diff_lines(raw, expected_trim));
-        }
-        panic!("test failed: outputs did not match expected value for flags: {:?}", failed_flags.iter().map(|(f,_,_)| *f).collect::<Vec<_>>());
     }
 }
 
